@@ -49,11 +49,100 @@ $('closeCrop').onclick=closeCrop;$('applyCrop').onclick=applyCrop;
 
 async function renorm(){for(const ch of state.chars)for(let i=0;i<(state.images[ch]||[]).length;i++)state.images[ch][i]=await normalize(state.images[ch][i]);renderChars();render();waitSave()}
 
-function project(){return{version:3,chars:[...state.chars],images:Object.fromEntries(state.chars.map(c=>[c,[...(state.images[c]||[])]])),settings:{...state.settings},text:state.text||''}}
-function dataBlob(data){const [h,b]=data.split(',');const bin=atob(b);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:(h.match(/data:([^;]+)/)||[])[1]||'application/octet-stream'})}
+function projectMeta(){
+  return{
+    version:4,
+    chars:[...state.chars],
+    images:Object.fromEntries(state.chars.map(c=>[
+      c,(state.images[c]||[]).map((_,i)=>({file:'project/images/'+encodeURIComponent(c)+'/'+String(i+1).padStart(3,'0')+'.png'}))
+    ])),
+    settings:{...state.settings},
+    text:state.text||''
+  }
+}
+function projectBundle(){
+  return{
+    ...projectMeta(),
+    images:Object.fromEntries(state.chars.map(c=>[c,[...(state.images[c]||[])]]))
+  }
+}
+function dataBlob(data){
+  const parts=data.split(',');
+  const header=parts[0]||'';
+  const b=parts.slice(1).join(',');
+  const bin=atob(b);
+  const u=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+  return new Blob([u],{type:(header.match(/data:([^;]+)/)||[])[1]||'application/octet-stream'})
+}
 async function txt(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error(path);return r.text()}
-async function exportProject(){try{const z=new JSZip(),p=project();z.file('project/project.json',JSON.stringify(p,null,2));z.file('project-data.js','window.__BUNDLED_PROJECT__='+JSON.stringify(p)+';');z.file('index.html',await txt('index.html'));z.file('styles.css',await txt('styles.css'));z.file('app.js',await txt('app.js'));for(const c of state.chars)(state.images[c]||[]).forEach((d,i)=>z.file('project/images/'+encodeURIComponent(c)+'/'+String(i+1).padStart(3,'0')+'.png',dataBlob(d)));z.file('README.txt','展開後に index.html を開くと同梱された project-data.js から画像・設定・文章を復元します。\n');const b=await z.generateAsync({type:'blob'}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download='image-text-tool-project.zip';a.click();URL.revokeObjectURL(u)}catch(e){console.error(e);alert('ZIP保存に失敗しました♡')}}
-async function importProject(f){try{const z=await JSZip.loadAsync(f),e=z.file('project/project.json');if(!e)throw Error('project/project.json');state=normalizeState(JSON.parse(await e.async('string')));await save();syncUI();$('text').value=state.text;renderChars();renderKeyboard();render();alert('復元したよ♡')}catch(e){console.error(e);alert('ZIPの読み込みに失敗しました♡')}}
+async function exportProject(){
+  try{
+    const z=new JSZip();
+    const meta=projectMeta();
+    const bundle=projectBundle();
+    z.file('project/project.json',JSON.stringify(meta,null,2));
+    z.file('project-data.js','window.__BUNDLED_PROJECT__='+JSON.stringify(bundle)+';');
+    z.file('index.html',await txt('index.html'));
+    z.file('styles.css',await txt('styles.css'));
+    z.file('app.js',await txt('app.js'));
+    for(const c of state.chars){
+      (state.images[c]||[]).forEach((d,i)=>{
+        z.file(meta.images[c][i].file,dataBlob(d));
+      });
+    }
+    z.file('README.txt',
+      'このZIPは画像ファイルを実体として同梱したプロジェクトです。\\n'+
+      'project/project.json が設定・文章・画像ファイルの対応表、project/images/ 以下が実画像です。\\n'+
+      'index.html を開くと project-data.js に埋め込んだプロジェクトを読み込めます。\\n'
+    );
+    const b=await z.generateAsync({type:'blob'});
+    const u=URL.createObjectURL(b),a=document.createElement('a');
+    a.href=u;
+    a.download='image-text-tool-project.zip';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(u),1000);
+  }catch(e){
+    console.error(e);
+    alert('画像込みZIP保存に失敗しました♡');
+  }
+}
+async function importProject(f){
+  try{
+    const z=await JSZip.loadAsync(f);
+    const e=z.file('project/project.json');
+    if(!e)throw Error('project/project.json');
+    const meta=JSON.parse(await e.async('string'));
+    const base=normalizeState({...meta,images:{}});
+    for(const ch of base.chars){
+      const entries=Array.isArray(meta.images?.[ch])?meta.images[ch]:[];
+      base.images[ch]=[];
+      for(let i=0;i<entries.length;i++){
+        const entry=entries[i];
+        if(typeof entry==='string'&&entry.startsWith('data:')){
+          base.images[ch].push(entry);
+          continue;
+        }
+        const path=entry?.file;
+        const file=path&&z.file(path);
+        if(!file)continue;
+        const b64=await file.async('base64');
+        base.images[ch].push('data:image/png;base64,'+b64);
+      }
+    }
+    state=base;
+    await save();
+    syncUI();
+    $('text').value=state.text;
+    renderChars();
+    renderKeyboard();
+    render();
+    alert('画像ファイルを含めて完全に復元したよ♡');
+  }catch(e){
+    console.error(e);
+    alert('画像込みZIPの読み込みに失敗しました♡');
+  }
+}
 
 $('randomImage').onchange=readUI;$('randomSize').onchange=readUI;$('autoCap').onchange=readUI;$('normalize').onchange=readUI;$('normW').onchange=readUI;$('normH').onchange=readUI;$('normMode').onchange=readUI;$('sizeMin').onchange=readUI;$('sizeMax').onchange=readUI;$('spacing').oninput=readUI;$('renorm').onclick=renorm;
 $('text').oninput=e=>{state.text=e.target.value;render();waitSave()};$('copyText').onclick=async()=>{await navigator.clipboard.writeText(state.text||'');alert('コピーしたよ♡')};$('clearText').onclick=()=>{$('text').value='';state.text='';render();waitSave()};$('reroll').onclick=render;$('printPdf').onclick=()=>window.print();
