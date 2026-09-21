@@ -49,99 +49,110 @@ $('closeCrop').onclick=closeCrop;$('applyCrop').onclick=applyCrop;
 
 async function renorm(){for(const ch of state.chars)for(let i=0;i<(state.images[ch]||[]).length;i++)state.images[ch][i]=await normalize(state.images[ch][i]);renderChars();render();waitSave()}
 
+function mimeOf(data){return((data.match(/^data:([^;,]+)/)||[])[1])||'image/png'}
+function extOf(mime){return mime==='image/jpeg'?'jpg':mime==='image/webp'?'webp':mime==='image/gif'?'gif':'png'}
 function projectMeta(){
   return{
-    version:4,
+    version:5,
     chars:[...state.chars],
-    images:Object.fromEntries(state.chars.map(c=>[
-      c,(state.images[c]||[]).map((_,i)=>({file:'project/images/'+encodeURIComponent(c)+'/'+String(i+1).padStart(3,'0')+'.png'}))
-    ])),
+    images:Object.fromEntries(state.chars.map(c=>[c,(state.images[c]||[]).map((d,i)=>{
+      const mime=mimeOf(d);
+      return{file:'project/images/'+encodeURIComponent(c)+'/'+String(i+1).padStart(3,'0')+'.'+extOf(mime),mime};
+    })])),
     settings:{...state.settings},
     text:state.text||''
   }
 }
 function projectBundle(){
-  return{
-    ...projectMeta(),
-    images:Object.fromEntries(state.chars.map(c=>[c,[...(state.images[c]||[])]]))
-  }
+  return{...projectMeta(),images:Object.fromEntries(state.chars.map(c=>[c,[...(state.images[c]||[])]]))}
 }
-function dataBlob(data){
-  const parts=data.split(',');
-  const header=parts[0]||'';
-  const b=parts.slice(1).join(',');
-  const bin=atob(b);
-  const u=new Uint8Array(bin.length);
+function dataBytes(data){
+  const b64=data.split(',')[1]||'';
+  const bin=atob(b64),u=new Uint8Array(bin.length);
   for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
-  return new Blob([u],{type:(header.match(/data:([^;]+)/)||[])[1]||'application/octet-stream'})
+  return u
 }
+const zipCrcTable=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=(c&1)?(0xedb88320^(c>>>1)):(c>>>1);t[n]=c>>>0}return t})();
+function crc32(bytes){let c=0xffffffff;for(const b of bytes)c=zipCrcTable[(c^b)&255]^(c>>>8);return(c^0xffffffff)>>>0}
+function u16(n){return Uint8Array.of(n&255,(n>>>8)&255)}
+function u32(n){return Uint8Array.of(n&255,(n>>>8)&255,(n>>>16)&255,(n>>>24)&255)}
+function cat(...arrs){const n=arrs.reduce((s,a)=>s+a.length,0),o=new Uint8Array(n);let p=0;for(const a of arrs){o.set(a,p);p+=a.length}return o}
+function zipMake(files){
+  const local=[],central=[];let offset=0;
+  const enc=new TextEncoder();
+  for(const f of files){
+    const name=enc.encode(f.name),data=f.data,crc=crc32(data);
+    const lh=cat(u32(0x04034b50),u16(20),u16(0x0800),u16(0),u16(0),u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0),name,data);
+    local.push(lh);
+    const ch=cat(u32(0x02014b50),u16(20),u16(20),u16(0x0800),u16(0),u16(0),u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(offset),name);
+    central.push(ch);offset+=lh.length;
+  }
+  const cd=cat(...central),body=cat(...local);
+  const end=cat(u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(cd.length),u32(body.length),u16(0));
+  return new Blob([body,cd,end],{type:'application/zip'})
+}
+function zipFind(bytes,sig,start=0){for(let i=Math.max(0,start);i<=bytes.length-4;i++)if((bytes[i]|bytes[i+1]<<8|bytes[i+2]<<16|bytes[i+3]<<24)===sig)return i;return-1}
+function rd16(b,o){return b[o]|(b[o+1]<<8)}
+function rd32(b,o){return(b[o]|b[o+1]<<8|b[o+2]<<16|b[o+3]<<24)>>>0}
+async function zipRead(file){
+  const b=new Uint8Array(await file.arrayBuffer()),eocd=(()=>{for(let i=b.length-22;i>=Math.max(0,b.length-65557);i--)if(rd32(b,i)===0x06054b50)return i;return-1})();
+  if(eocd<0)throw Error('ZIP end record not found');
+  const count=rd16(b,eocd+10),cdOffset=rd32(b,eocd+16),out={};let p=cdOffset;
+  for(let n=0;n<count;n++){
+    if(rd32(b,p)!==0x02014b50)throw Error('Invalid central directory');
+    const flags=rd16(b,p+8),method=rd16(b,p+10),csize=rd32(b,p+20),usize=rd32(b,p+24),nl=rd16(b,p+28),el=rd16(b,p+30),cl=rd16(b,p+32),lo=rd32(b,p+42);
+    const name=new TextDecoder().decode(b.slice(p+46,p+46+nl));p+=46+nl+el+cl;
+    const lnl=rd16(b,lo+26),lel=rd16(b,lo+28),start=lo+30+lnl+lel,comp=b.slice(start,start+csize);
+    let data=comp;
+    if(method===8){
+      if(typeof DecompressionStream==='undefined')throw Error('このブラウザはZIP圧縮展開に対応していません');
+      const ds=new DecompressionStream('deflate-raw');
+      data=new Uint8Array(await new Response(new Blob([comp]).stream().pipeThrough(ds)).arrayBuffer());
+    }else if(method!==0)throw Error('未対応ZIP圧縮方式');
+    if(usize!==data.length&&method===0)throw Error('ZIPサイズ確認失敗');
+    out[name]=data;
+  }
+  return out
+}
+function textBytes(s){return new TextEncoder().encode(s)}
 async function txt(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error(path);return r.text()}
+async function siteSources(){
+  if(window.__SITE_SOURCES__)return window.__SITE_SOURCES__;
+  return{index:await txt('index.html'),styles:await txt('styles.css'),app:await txt('app.js'),source:await txt('site-source.js'),projectData:await txt('project-data.js')};
+}
 async function exportProject(){
   try{
-    const z=new JSZip();
-    const meta=projectMeta();
-    const bundle=projectBundle();
-    z.file('project/project.json',JSON.stringify(meta,null,2));
-    z.file('project-data.js','window.__BUNDLED_PROJECT__='+JSON.stringify(bundle)+';');
-    z.file('index.html',await txt('index.html'));
-    z.file('styles.css',await txt('styles.css'));
-    z.file('app.js',await txt('app.js'));
-    for(const c of state.chars){
-      (state.images[c]||[]).forEach((d,i)=>{
-        z.file(meta.images[c][i].file,dataBlob(d));
-      });
-    }
-    z.file('README.txt',
-      'このZIPは画像ファイルを実体として同梱したプロジェクトです。\\n'+
-      'project/project.json が設定・文章・画像ファイルの対応表、project/images/ 以下が実画像です。\\n'+
-      'index.html を開くと project-data.js に埋め込んだプロジェクトを読み込めます。\\n'
-    );
-    const b=await z.generateAsync({type:'blob'});
-    const u=URL.createObjectURL(b),a=document.createElement('a');
-    a.href=u;
-    a.download='image-text-tool-project.zip';
-    a.click();
-    setTimeout(()=>URL.revokeObjectURL(u),1000);
-  }catch(e){
-    console.error(e);
-    alert('画像込みZIP保存に失敗しました♡');
-  }
+    const p=projectBundle(),meta=projectMeta(),s=await siteSources(),files=[
+      {name:'index.html',data:textBytes(s.index)},
+      {name:'styles.css',data:textBytes(s.styles)},
+      {name:'app.js',data:textBytes(s.app)},
+      {name:'project-data.js',data:textBytes('window.__BUNDLED_PROJECT__='+JSON.stringify(p)+';')},
+      {name:'site-source.js',data:textBytes(s.source)},
+      {name:'project/project.json',data:textBytes(JSON.stringify(meta,null,2))},
+      {name:'README.txt',data:textBytes('画像ファイルを実体として同梱した持ち運び用プロジェクトです。\n展開後は index.html を開いてください。\n')}
+    ];
+    for(const c of state.chars)(state.images[c]||[]).forEach((d,i)=>files.push({name:meta.images[c][i].file,data:dataBytes(d)}));
+    const blob=zipMake(files),u=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=u;a.download='image-text-tool-project.zip';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),2000);
+    alert('画像を含むZIPを作成したよ♡');
+  }catch(e){console.error(e);alert('ZIP保存に失敗しました♡ '+e.message)}
 }
 async function importProject(f){
   try{
-    const z=await JSZip.loadAsync(f);
-    const e=z.file('project/project.json');
-    if(!e)throw Error('project/project.json');
-    const meta=JSON.parse(await e.async('string'));
-    const base=normalizeState({...meta,images:{}});
+    const files=await zipRead(f),pj=files['project/project.json'];
+    if(!pj)throw Error('project/project.json がありません');
+    const meta=JSON.parse(new TextDecoder().decode(pj)),base=normalizeState({...meta,images:{}});
     for(const ch of base.chars){
-      const entries=Array.isArray(meta.images?.[ch])?meta.images[ch]:[];
       base.images[ch]=[];
-      for(let i=0;i<entries.length;i++){
-        const entry=entries[i];
-        if(typeof entry==='string'&&entry.startsWith('data:')){
-          base.images[ch].push(entry);
-          continue;
-        }
-        const path=entry?.file;
-        const file=path&&z.file(path);
-        if(!file)continue;
-        const b64=await file.async('base64');
-        base.images[ch].push('data:image/png;base64,'+b64);
+      for(const entry of (meta.images?.[ch]||[])){
+        if(typeof entry==='string'&&entry.startsWith('data:')){base.images[ch].push(entry);continue}
+        const raw=files[entry.file];if(!raw)continue;
+        let bin='';for(let i=0;i<raw.length;i++)bin+=String.fromCharCode(raw[i]);
+        base.images[ch].push('data:'+(entry.mime||'image/png')+';base64,'+btoa(bin));
       }
     }
-    state=base;
-    await save();
-    syncUI();
-    $('text').value=state.text;
-    renderChars();
-    renderKeyboard();
-    render();
-    alert('画像ファイルを含めて完全に復元したよ♡');
-  }catch(e){
-    console.error(e);
-    alert('画像込みZIPの読み込みに失敗しました♡');
-  }
+    state=base;await save();syncUI();$('text').value=state.text;renderChars();renderKeyboard();render();alert('画像ファイルごと復元したよ♡');
+  }catch(e){console.error(e);alert('ZIPの読み込みに失敗しました♡ '+e.message)}
 }
 
 $('randomImage').onchange=readUI;$('randomSize').onchange=readUI;$('autoCap').onchange=readUI;$('normalize').onchange=readUI;$('normW').onchange=readUI;$('normH').onchange=readUI;$('normMode').onchange=readUI;$('sizeMin').onchange=readUI;$('sizeMax').onchange=readUI;$('spacing').oninput=readUI;$('renorm').onclick=renorm;
