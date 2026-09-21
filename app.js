@@ -118,8 +118,9 @@ function textBytes(s){return new TextEncoder().encode(s)}
 async function txt(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error(path);return r.text()}
 async function siteSources(){
   if(window.__SITE_SOURCES__)return window.__SITE_SOURCES__;
-  return{index:await txt('index.html'),styles:await txt('styles.css'),app:await txt('app.js'),source:await txt('site-source.js'),projectData:await txt('project-data.js')};
+  return{index:await txt('index.html'),styles:await txt('styles.css'),app:await txt('app.js')};
 }
+function siteSourceText(s){return 'window.__SITE_SOURCES__='+JSON.stringify({index:s.index,styles:s.styles,app:s.app})+';'}
 async function exportProject(){
   try{
     const p=projectBundle(),meta=projectMeta(),s=await siteSources(),files=[
@@ -127,7 +128,7 @@ async function exportProject(){
       {name:'styles.css',data:textBytes(s.styles)},
       {name:'app.js',data:textBytes(s.app)},
       {name:'project-data.js',data:textBytes('window.__BUNDLED_PROJECT__='+JSON.stringify(p)+';')},
-      {name:'site-source.js',data:textBytes(s.source)},
+      {name:'site-source.js',data:textBytes(siteSourceText(s))},
       {name:'project/project.json',data:textBytes(JSON.stringify(meta,null,2))},
       {name:'README.txt',data:textBytes('画像ファイルを実体として同梱した持ち運び用プロジェクトです。\n展開後は index.html を開いてください。\n')}
     ];
