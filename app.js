@@ -52,43 +52,105 @@ async function renorm(){for(const ch of state.chars)for(let i=0;i<(state.images[
 function mimeOf(data){return((data.match(/^data:([^;,]+)/)||[])[1])||'image/png'}
 function extOf(mime){return mime==='image/jpeg'?'jpg':mime==='image/webp'?'webp':mime==='image/gif'?'gif':'png'}
 async function exportPreviewPNG(){
-  const p=$('preview');
-  const items=[];
-  const base=p.getBoundingClientRect();
-  const walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
-  while(walker.nextNode()){
-    const n=walker.currentNode;
-    if(!n.textContent.trim())continue;
-    const r=document.createRange();r.selectNodeContents(n);
-    for(const q of r.getClientRects())items.push({type:'text',node:n,rect:q});
-  }
-  p.querySelectorAll('img,span').forEach(el=>{const r=el.getBoundingClientRect();if(r.width>0&&r.height>0)items.push({type:el.tagName==='IMG'?'img':'span',el,rect:r})});
-  if(!items.length){alert('保存する文字がありません♡');return}
-  const minX=Math.min(...items.map(x=>x.rect.left)),minY=Math.min(...items.map(x=>x.rect.top));
-  const maxX=Math.max(...items.map(x=>x.rect.right)),maxY=Math.max(...items.map(x=>x.rect.bottom));
-  const pad=6,scale=Math.min(4,Math.max(1,window.devicePixelRatio||1));
-  const w=Math.max(1,Math.ceil(maxX-minX+pad*2)),h=Math.max(1,Math.ceil(maxY-minY+pad*2));
-  const c=document.createElement('canvas');c.width=Math.ceil(w*scale);c.height=Math.ceil(h*scale);
-  const ctx=c.getContext('2d');ctx.scale(scale,scale);ctx.imageSmoothingEnabled=true;
-  const load=src=>new Promise((ok,no)=>{const im=new Image();im.onload=()=>ok(im);im.onerror=no;im.src=src});
-  for(const it of items){
-    const x=it.rect.left-minX+pad,y=it.rect.top-minY+pad;
-    if(it.type==='img'){
-      try{const im=await load(it.el.currentSrc||it.el.src);ctx.drawImage(im,x,y,it.rect.width,it.rect.height)}catch{}
-    }else{
-      const cs=getComputedStyle(it.type==='span'?it.el:it.node.parentElement);
-      ctx.font=cs.font;ctx.fillStyle=cs.color;ctx.textBaseline='top';
-      ctx.fillText(it.node?it.node.textContent:it.el.textContent,x,y);
+  try{
+    const p=$('preview');
+    const items=[];
+    const walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
+    while(walker.nextNode()){
+      const node=walker.currentNode;
+      if(!node.textContent)continue;
+      for(let i=0;i<node.textContent.length;i++){
+        if(node.textContent[i]===' '||node.textContent[i]==='\n')continue;
+        const range=document.createRange();
+        range.setStart(node,i);
+        range.setEnd(node,i+1);
+        const rect=range.getBoundingClientRect();
+        if(rect.width>0&&rect.height>0)items.push({kind:'text',text:node.textContent[i],node,rect});
+      }
     }
-  }
-  c.toBlob(blob=>{
-    if(!blob){alert('画像の作成に失敗しました♡');return}
-    const u=URL.createObjectURL(blob),a=document.createElement('a');
-    a.href=u;a.download='image-text-preview.png';document.body.appendChild(a);a.click();a.remove();
-    setTimeout(()=>URL.revokeObjectURL(u),2000);
-  },'image/png');
-}
+    p.querySelectorAll('img.glyph').forEach(el=>{
+      const rect=el.getBoundingClientRect();
+      if(rect.width>0&&rect.height>0)items.push({kind:'img',el,rect});
+    });
+    if(!items.length){alert('保存する文字がありません♡');return}
 
+    const minX=Math.min(...items.map(o=>o.rect.left));
+    const minY=Math.min(...items.map(o=>o.rect.top));
+    const maxX=Math.max(...items.map(o=>o.rect.right));
+    const maxY=Math.max(...items.map(o=>o.rect.bottom));
+    const pad=8;
+    const width=Math.max(1,Math.ceil(maxX-minX+pad*2));
+    const height=Math.max(1,Math.ceil(maxY-minY+pad*2));
+    const scale=Math.min(3,Math.max(1,window.devicePixelRatio||1));
+
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.ceil(width*scale);
+    canvas.height=Math.ceil(height*scale);
+    const ctx=canvas.getContext('2d');
+    ctx.scale(scale,scale);
+    ctx.clearRect(0,0,width,height);
+
+    const loadImg=src=>new Promise((resolve,reject)=>{
+      const im=new Image();
+      im.onload=()=>resolve(im);
+      im.onerror=reject;
+      im.src=src;
+    });
+
+    for(const item of items){
+      const x=item.rect.left-minX+pad;
+      const y=item.rect.top-minY+pad;
+      if(item.kind==='img'){
+        try{
+          const im=await loadImg(item.el.currentSrc||item.el.src);
+          ctx.drawImage(im,x,y,item.rect.width,item.rect.height);
+        }catch(e){console.warn(e)}
+      }else{
+        const style=getComputedStyle(item.node.parentElement||p);
+        ctx.font=style.font;
+        ctx.fillStyle=style.color||'#000';
+        ctx.textBaseline='top';
+        ctx.fillText(item.text,x,y);
+      }
+    }
+
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+    if(!blob){alert('PNGの作成に失敗しました♡');return}
+    const filename='image-text-preview.png';
+
+    // スマホで共有保存できる場合はこちらを優先
+    if(navigator.share && typeof File!=='undefined'){
+      try{
+        const file=new File([blob],filename,{type:'image/png'});
+        if(!navigator.canShare || navigator.canShare({files:[file]})){
+          await navigator.share({files:[file],title:'画像文字プレビュー'});
+          return;
+        }
+      }catch(e){
+        if(e&&e.name==='AbortError')return;
+      }
+    }
+
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=filename;
+    a.rel='noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    // Safari / 一部スマホで download 属性が無視された場合のフォールバック
+    setTimeout(()=>{
+      const popup=window.open(url,'_blank');
+      if(!popup)location.href=url;
+      setTimeout(()=>URL.revokeObjectURL(url),30000);
+    },500);
+  }catch(e){
+    console.error(e);
+    alert('画像保存に失敗しました♡ '+(e&&e.message?e.message:e));
+  }
+}
 function projectMeta(){
   return{
     version:5,
@@ -195,7 +257,7 @@ async function importProject(f){
 }
 
 $('randomImage').onchange=readUI;$('randomSize').onchange=readUI;$('autoCap').onchange=readUI;$('normalize').onchange=readUI;$('normW').onchange=readUI;$('normH').onchange=readUI;$('normMode').onchange=readUI;$('sizeMin').onchange=readUI;$('sizeMax').onchange=readUI;$('spacing').oninput=readUI;$('renorm').onclick=renorm;
-$('text').oninput=e=>{state.text=e.target.value;render();waitSave()};$('copyText').onclick=async()=>{await navigator.clipboard.writeText(state.text||'');alert('コピーしたよ♡')};$('clearText').onclick=()=>{$('text').value='';state.text='';render();waitSave()};$('reroll').onclick=render;$('printPdf').onclick=()=>window.print();
+$('text').oninput=e=>{state.text=e.target.value;render();waitSave()};$('savePng').onclick=exportPreviewPNG;$('copyText').onclick=async()=>{await navigator.clipboard.writeText(state.text||'');alert('コピーしたよ♡')};$('clearText').onclick=()=>{$('text').value='';state.text='';render();waitSave()};$('reroll').onclick=render;$('printPdf').onclick=()=>window.print();
 $('addChar').onclick=()=>$('modal').classList.remove('hidden');$('cancelAdd').onclick=()=>$('modal').classList.add('hidden');$('okAdd').onclick=()=>{const c=[...$('newChar').value.trim()][0];if(!c)return;if(state.chars.includes(c)){alert('その文字はすでに登録されています♡');return}state.chars.push(c);state.images[c]=[];$('newChar').value='';$('modal').classList.add('hidden');renderChars();renderKeyboard();waitSave()};
 $('exportBtn').onclick=exportProject;$('importBtn').onclick=()=>$('importFile').click();$('importFile').onchange=e=>e.target.files[0]&&importProject(e.target.files[0]);
 $('resetBtn').onclick=async()=>{if(!confirm('保存データを削除する？'))return;await clearDB();state={chars:[...DEFAULT_CHARS],images:Object.fromEntries(DEFAULT_CHARS.map(c=>[c,[]])),settings:{...DEFAULT_SETTINGS},text:''};$('text').value='';syncUI();renderChars();renderKeyboard();render()};
