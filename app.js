@@ -51,6 +51,44 @@ async function renorm(){for(const ch of state.chars)for(let i=0;i<(state.images[
 
 function mimeOf(data){return((data.match(/^data:([^;,]+)/)||[])[1])||'image/png'}
 function extOf(mime){return mime==='image/jpeg'?'jpg':mime==='image/webp'?'webp':mime==='image/gif'?'gif':'png'}
+async function exportPreviewPNG(){
+  const p=$('preview');
+  const items=[];
+  const base=p.getBoundingClientRect();
+  const walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
+  while(walker.nextNode()){
+    const n=walker.currentNode;
+    if(!n.textContent.trim())continue;
+    const r=document.createRange();r.selectNodeContents(n);
+    for(const q of r.getClientRects())items.push({type:'text',node:n,rect:q});
+  }
+  p.querySelectorAll('img,span').forEach(el=>{const r=el.getBoundingClientRect();if(r.width>0&&r.height>0)items.push({type:el.tagName==='IMG'?'img':'span',el,rect:r})});
+  if(!items.length){alert('保存する文字がありません♡');return}
+  const minX=Math.min(...items.map(x=>x.rect.left)),minY=Math.min(...items.map(x=>x.rect.top));
+  const maxX=Math.max(...items.map(x=>x.rect.right)),maxY=Math.max(...items.map(x=>x.rect.bottom));
+  const pad=6,scale=Math.min(4,Math.max(1,window.devicePixelRatio||1));
+  const w=Math.max(1,Math.ceil(maxX-minX+pad*2)),h=Math.max(1,Math.ceil(maxY-minY+pad*2));
+  const c=document.createElement('canvas');c.width=Math.ceil(w*scale);c.height=Math.ceil(h*scale);
+  const ctx=c.getContext('2d');ctx.scale(scale,scale);ctx.imageSmoothingEnabled=true;
+  const load=src=>new Promise((ok,no)=>{const im=new Image();im.onload=()=>ok(im);im.onerror=no;im.src=src});
+  for(const it of items){
+    const x=it.rect.left-minX+pad,y=it.rect.top-minY+pad;
+    if(it.type==='img'){
+      try{const im=await load(it.el.currentSrc||it.el.src);ctx.drawImage(im,x,y,it.rect.width,it.rect.height)}catch{}
+    }else{
+      const cs=getComputedStyle(it.type==='span'?it.el:it.node.parentElement);
+      ctx.font=cs.font;ctx.fillStyle=cs.color;ctx.textBaseline='top';
+      ctx.fillText(it.node?it.node.textContent:it.el.textContent,x,y);
+    }
+  }
+  c.toBlob(blob=>{
+    if(!blob){alert('画像の作成に失敗しました♡');return}
+    const u=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=u;a.download='image-text-preview.png';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),2000);
+  },'image/png');
+}
+
 function projectMeta(){
   return{
     version:5,
