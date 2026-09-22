@@ -86,8 +86,9 @@ async function exportPreviewPNG(){
     const canvas=document.createElement('canvas');
     canvas.width=Math.ceil(width*scale);
     canvas.height=Math.ceil(height*scale);
-    const ctx=canvas.getContext('2d');
+    const ctx=canvas.getContext('2d',{alpha:false});
     ctx.scale(scale,scale);
+    ctx.globalCompositeOperation='source-over';
     ctx.fillStyle='#fff';
     ctx.fillRect(0,0,width,height);
 
