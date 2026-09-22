@@ -88,7 +88,8 @@ async function exportPreviewPNG(){
     canvas.height=Math.ceil(height*scale);
     const ctx=canvas.getContext('2d');
     ctx.scale(scale,scale);
-    ctx.clearRect(0,0,width,height);
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,width,height);
 
     const loadImg=src=>new Promise((resolve,reject)=>{
       const im=new Image();
